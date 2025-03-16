@@ -1,0 +1,37 @@
+model_name: tinyllava/TinyLLaVA-Phi-2-SigLIP-3.1B
+ssm_layers: [0, 6, 12, 18]
+kl_weight: 1
+tl_weight: 1
+sl_weight: 0
+output_hidden_states: true
+ce_weight: 0
+do_eval: false
+tune_mlp: true
+tl_loss_type: l2
+loss_type: kl
+temperature: 1.0
+output_dir: output/MaTVLM_0_125_Mamba2
+seed: 42
+save_steps: 4000
+warmup_steps: 64000
+decay_steps: 64000
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 4
+num_train_epochs: 1
+gradient_accumulation_steps: 64
+lr_scheduler_type: warmup_stable_decay
+optim: adamw_torch
+adam_beta1: 0.9
+adam_beta2: 0.95
+learning_rate: 2.0e-4
+weight_decay: 1.0e-2
+max_grad_norm: 0.1
+# data args
+data_path: playground/data/sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k.json
+image_folder: playground/data
+lazy_preprocess: true
+is_multimodal: true
+image_aspect_ratio: square
+gradient_checkpointing: true
+conv_version: phi
+model_max_length: 1428
