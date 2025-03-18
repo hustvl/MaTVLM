@@ -12,7 +12,7 @@
 
 (<sup>:email:</sup>) corresponding author.
 
-[![MaTVLM](https://img.shields.io/badge/Paper-MaTVLM-2b9348.svg?logo=arXiv)](https://arxiv.org/abs/)&nbsp;
+[![MaTVLM](https://img.shields.io/badge/Paper-MaTVLM-2b9348.svg?logo=arXiv)](https://arxiv.org/abs/2503.13440)&nbsp;
 [![MaTVLM](https://img.shields.io/badge/Code-HustVL/MaTVLM-white?&logo=github&logoColor=white)](https://github.com/hustvl/MaTVLM)&nbsp;
 [![huggingface weights](https://img.shields.io/badge/%F0%9F%A4%97%20Weights-MaTVLM_0_25_Mamba2-yellow)](https://huggingface.co/hustvl/MaTVLM_0_25_Mamba2)&nbsp;
 
@@ -95,7 +95,13 @@ This code is developed on the top of [TinyLLaVA](https://github.com/TinyLLaVA/Ti
 If you find MaTVLM is useful in your research or applications, please consider giving us a star 🌟 and citing it by the following BibTeX entry.
 
 ```bibtex
- @article{,
-
+@misc{li2025matvlmhybridmambatransformerefficient,
+      title={MaTVLM: Hybrid Mamba-Transformer for Efficient Vision-Language Modeling}, 
+      author={Yingyue Li and Bencheng Liao and Wenyu Liu and Xinggang Wang},
+      year={2025},
+      eprint={2503.13440},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2503.13440}, 
 }
 ```

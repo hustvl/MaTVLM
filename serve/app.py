@@ -32,7 +32,7 @@ block_css = """
 """
 title_markdown = """
 # MaTVLM: Hybrid Mamba-Transformer for Efficient Vision-Language Modeling
-[[Code](https://github.com/hustvl/MaTVLM)] | 📚 [[Paper]()]
+[[Code](https://github.com/hustvl/MaTVLM)] | 📚 [[Paper](https://arxiv.org/abs/2503.13440)]
 """
 tos_markdown = """
 ### Terms of use
