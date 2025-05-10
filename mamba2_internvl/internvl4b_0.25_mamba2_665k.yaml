@@ -1,5 +1,5 @@
-model_name: OpenGVLab/InternVL2_5-2B
-ssm_layers: [0, 4, 8, 12, 16, 20]
+model_name: OpenGVLab/InternVL2_5-4B
+ssm_layers: [0, 4, 8, 12, 16, 20, 24, 28, 32]
 kl_weight: 1
 tl_weight: 1
 sl_weight: 0
@@ -10,7 +10,7 @@ tune_mlp: true
 tl_loss_type: l2
 loss_type: kl
 temperature: 1.0
-output_dir: output/MaTVLM_0_25_Mamba2_InternVL_2B_80k
+output_dir: output/MaTVLM_0_25_Mamba2_InternVL_4B
 seed: 42
 save_steps: 4000
 warmup_steps: 64000
@@ -39,4 +39,4 @@ vision_select_layer: -1
 dynamic_image_size: true
 use_thumbnail: true
 ps_version: v2
-meta_path: mamba2_internvl/data_llava_instruct_80k.json
+meta_path: mamba2_internvl/data.json

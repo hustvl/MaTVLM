@@ -27,8 +27,6 @@ class PhiMLP(nn.Module):
         hidden_states = self.activation_fn(hidden_states)
         hidden_states = self.fc2(hidden_states)
         return hidden_states
-
-
 class PhiMambaDecoderLayer(nn.Module):
     def __init__(self, config: PhiMambaConfig, layer_idx: int,
         device=None,

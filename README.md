@@ -77,7 +77,7 @@ Please refer to the [document](https://tinyllava-factory.readthedocs.io/en/lates
 ### Start training!
 
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3 ACCELERATE_LOG_LEVEL=info PYTHONPATH=. accelerate launch --main_process_port=9999 --config_file multi_gpu.yaml train_tinyllava_mamba2/train_hybrid.py mamba2_tinyllava/tinyllava_0.25_mamba2_665k.yaml 2>&1 | tee -a output_train.txt
+CUDA_VISIBLE_DEVICES=0,1,2,3 ACCELERATE_LOG_LEVEL=info PYTHONPATH=. accelerate launch --main_process_port=9999 --config_file multi_gpu.yaml train_internvl_mamba2/train_hybrid.py mamba2_internvl/internvl2b_0.25_mamba2_665k.yaml 2>&1 | tee -a output_train.txt
 ```
 It takes around 48 hours for [MaTVLM_0.25_Mamba2](https://huggingface.co/hustvl/MaTVLM_0_25_Mamba2) on 4x 3090 (24G).
 

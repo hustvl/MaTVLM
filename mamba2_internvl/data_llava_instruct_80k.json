@@ -1,0 +1,10 @@
+{
+  "llava_instruct_80k": {
+    "root":"playground/data/coco/train2017",
+    "annotation": "playground/data/llava_instruct_80k.jsonl",
+    "data_augment": false,
+    "repeat_time": 1,
+    "length": 80000
+  }
+}
+

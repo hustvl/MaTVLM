@@ -1,0 +1,29 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch train_hybrid.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/data/yingyueli/miniconda3/envs/matvlm/lib/python3.10/site-packages/accelerate/commands/launch.py",
+            "args": [
+                "--main_process_port", "8888",
+                "--config_file", "multi_gpu.yaml",
+                "train_internvl_mamba2/train_hybrid.py",
+                "mamba2_internvl/internvl_0.25_mamba2_665k.yaml"
+            ],
+            "env": {
+              "CUDA_VISIBLE_DEVICES": "0",
+              "ACCELERATE_LOG_LEVEL": "info",
+              "PYTHONPATH": "."
+            },
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${command:python.interpreterPath}",
+            "justMyCode": false
+        }
+    ]
+}
