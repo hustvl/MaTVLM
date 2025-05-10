@@ -569,3 +569,101 @@ class HybridInternVLChatModel(InternVLChatModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+
+    @torch.no_grad()
+    def generate(
+            self,
+            pixel_values: Optional[torch.FloatTensor] = None,
+            input_ids: Optional[torch.FloatTensor] = None,
+            attention_mask: Optional[torch.LongTensor] = None,
+            visual_features: Optional[torch.FloatTensor] = None,
+            generation_config: Optional[GenerationConfig] = None,
+            output_hidden_states: Optional[bool] = None,
+            **generate_kwargs,
+    ) -> torch.LongTensor:
+
+        assert self.img_context_token_id is not None
+        if pixel_values is not None:
+            if visual_features is not None:
+                vit_embeds = visual_features
+            else:
+                vit_embeds = self.extract_feature(pixel_values)
+            input_embeds = self.language_model.get_input_embeddings()(input_ids)
+            B, N, C = input_embeds.shape
+            input_embeds = input_embeds.reshape(B * N, C)
+
+            input_ids = input_ids.reshape(B * N)
+            selected = (input_ids == self.img_context_token_id)
+            assert selected.sum() != 0
+            input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
+
+            input_embeds = input_embeds.reshape(B, N, C)
+        else:
+            input_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+        outputs = self.language_model.generate(
+            input_ids = input_ids.reshape(B, N),
+            inputs_embeds=input_embeds,
+            **generate_kwargs,
+        )
+
+        return outputs
+
+    def chat(self, tokenizer, pixel_values, question, generation_config, history=None, return_history=False,
+                num_patches_list=None, IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>', IMG_CONTEXT_TOKEN='<IMG_CONTEXT>',
+                verbose=False):
+
+        if history is None and pixel_values is not None and '<image>' not in question:
+            question = '<image>\n' + question
+
+        if num_patches_list is None:
+            num_patches_list = [pixel_values.shape[0]] if pixel_values is not None else []
+        assert pixel_values is None or len(pixel_values) == sum(num_patches_list)
+
+        img_context_token_id = tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+        self.img_context_token_id = img_context_token_id
+
+        template = get_conv_template(self.template)
+        template.system_message = self.system_message
+        eos_token_id = tokenizer.convert_tokens_to_ids(template.sep.strip())
+
+        history = [] if history is None else history
+        for (old_question, old_answer) in history:
+            template.append_message(template.roles[0], old_question)
+            template.append_message(template.roles[1], old_answer)
+        template.append_message(template.roles[0], question)
+        template.append_message(template.roles[1], None)
+        query = template.get_prompt()
+
+        if verbose and pixel_values is not None:
+            image_bs = pixel_values.shape[0]
+            # print(f'dynamic ViT batch size: {image_bs}')
+
+        for num_patches in num_patches_list:
+            image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.num_image_token * num_patches + IMG_END_TOKEN
+            query = query.replace('<image>', image_tokens, 1)
+
+        model_inputs = tokenizer(query, return_tensors='pt')
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        input_ids = model_inputs['input_ids'].to(device)
+        attention_mask = model_inputs['attention_mask'].to(device)
+        generation_config['eos_token_id'] = eos_token_id
+        generation_output = self.generate(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **generation_config
+        )
+        generation_output = generation_output[:, input_ids.shape[1]:]
+        response = tokenizer.batch_decode(generation_output, skip_special_tokens=True)[0]
+        response = response.split(template.sep.strip())[0].strip()
+        history.append((question, response))
+        if return_history:
+            return response, history
+        else:
+            query_to_print = query.replace(IMG_CONTEXT_TOKEN, '')
+            query_to_print = query_to_print.replace(f'{IMG_START_TOKEN}{IMG_END_TOKEN}', '<image>')
+            if verbose:
+                print(query_to_print, response)
+            return response

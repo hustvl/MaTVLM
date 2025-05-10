@@ -2,6 +2,7 @@
 # Copyright (c) 2023, Albert Gu, Tri Dao.
 import os
 import json
+from re import S
 
 import torch
 import torch.nn as nn
@@ -74,7 +75,6 @@ def decode(
     model,
     max_length,
     inputs_embeds=None,
-    image_embeds=None,
     top_k=1,
     top_p=0.0,
     min_p=0.0,
@@ -107,9 +107,7 @@ def decode(
 
     batch_size, seqlen_og = input_ids.shape
 
-    if image_embeds is not None and inputs_embeds is not None:
-        max_length += image_embeds.shape[1] - 1
-        batch_size, seqlen_og = inputs_embeds.shape[:2]
+    max_length += seqlen_og
         
     teacher_output_len = teacher_outputs.shape[1] if teacher_outputs is not None else 0
     if cg:
@@ -264,7 +262,6 @@ class EvalMamba2TransformerHybridModelWrapper(nn.Module):
         input_ids,
         max_new_tokens,
         inputs_embeds=None,
-        image_embeds=None,
         top_k=1,
         top_p=0.0,
         min_p=0.0,
@@ -274,7 +271,7 @@ class EvalMamba2TransformerHybridModelWrapper(nn.Module):
         **kwargs,
     ):
         output = decode(
-            input_ids, self, max_length=max_new_tokens, inputs_embeds=inputs_embeds, image_embeds=image_embeds,
+            input_ids, self, max_length=max_new_tokens, inputs_embeds=inputs_embeds,
             top_k=top_k, top_p=top_p, min_p = min_p, temperature=temperature, **kwargs
         )
         if not output_scores:
@@ -298,26 +295,21 @@ class EvalMamba2TransformerHybridModelWrapper(nn.Module):
             hidden_states = self.model.model.final_layernorm(hidden_states)
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
-        lm_logits = self.model.lm_head(hidden_states)
+        lm_logits = self.model.output(hidden_states)
         CausalLMOutput = namedtuple("CausalLMOutput", ["logits"])
         return CausalLMOutput(logits=lm_logits)
 
     @staticmethod
-    def from_pretrained_local(pretrained_model_name, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
+    def from_pretrained_local(pretrained_model_name, transformer_model, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
         config_data = load_config_hf(pretrained_model_name)
-        transformer_model = AutoModelForCausalLM.from_pretrained(config_data["llm_model_name_or_path"], torch_dtype=torch_dtype, attn_implementation=attn_implementation, trust_remote_code=True)
         with open(f'{pretrained_model_name}/{MAMBA_CONFIG_NAME}', 'r') as json_file:
             config_dict = json.load(json_file)
-        if "phi" in config_data["llm_model_name_or_path"].lower():
-            mamba_config = PhiMambaConfig(**config_dict)
-        else:
-            mamba_config = MambaConfig(**config_dict)
+        mamba_config = MambaConfig(**config_dict)
         return EvalMamba2TransformerHybridModelWrapper(pretrained_model_name, transformer_model, mamba_config, mamba_config.attn_layers, torch_dtype, init_with_kqvo=False) 
 
     @staticmethod
-    def from_pretrained_hub(pretrained_model_name, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
+    def from_pretrained_hub(pretrained_model_name, transformer_model, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
         config_data = load_config_hf(pretrained_model_name)
-        transformer_model = AutoModelForCausalLM.from_pretrained(config_data["llm_model_name_or_path"], torch_dtype=torch_dtype, attn_implementation=attn_implementation)
         resolved_archive_file = cached_file(pretrained_model_name, MAMBA_CONFIG_NAME, _raise_exceptions_for_missing_entries=False)
         config_dict = json.load(open(resolved_archive_file))
         if "phi" in config_data["llm_model_name_or_path"].lower():
@@ -327,11 +319,11 @@ class EvalMamba2TransformerHybridModelWrapper(nn.Module):
         return EvalMamba2TransformerHybridModelWrapper(pretrained_model_name, transformer_model, mamba_config, mamba_config.attn_layers, torch_dtype, init_with_kqvo=False, load_from_hub=True) 
 
     @staticmethod
-    def from_pretrained(pretrained_model_name, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
+    def from_pretrained(pretrained_model_name, transformer_model, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
         if os.path.exists(pretrained_model_name):
-            return EvalMamba2TransformerHybridModelWrapper.from_pretrained_local(pretrained_model_name, torch_dtype, attn_implementation)
+            return EvalMamba2TransformerHybridModelWrapper.from_pretrained_local(pretrained_model_name, transformer_model, torch_dtype, attn_implementation)
         else:
-            return EvalMamba2TransformerHybridModelWrapper.from_pretrained_hub(pretrained_model_name, torch_dtype, attn_implementation)
+            return EvalMamba2TransformerHybridModelWrapper.from_pretrained_hub(pretrained_model_name, transformer_model, torch_dtype, attn_implementation)
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()

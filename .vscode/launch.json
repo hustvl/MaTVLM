@@ -5,20 +5,52 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "model_vqa_loader",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/internvl/eval/model_vqa_loader.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--checkpoint", "output/MaTVLM_0_Mamba2_InternVL_2B", "--question-file", "playground/data/eval/MME/llava_mme.jsonl", "--image-folder", "playground/data/eval/MME/MME_Benchmark_release_version", "--answers-file", "playground/data/eval/MME/answers/InternVL2_5-2B/1_0.jsonl", "--num-chunks", "1", "--chunk-idx", "0", "--temperature", "0.2", "--dynamic"],
+            "env": {
+                "PYTHONPATH": ".",
+                "CUDA_VISIBLE_DEVICES": "1",
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "model_vqa_loader_v2",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/internvl/eval/model_vqa_loader.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--checkpoint", "OpenGVLab/InternVL2_5-2B", "--question-file", "playground/data/eval/MME/llava_mme.jsonl", "--image-folder", "playground/data/eval/MME/MME_Benchmark_release_version", "--answers-file", "playground/data/eval/MME/answers/InternVL2_5-2B/1_0.jsonl", "--num-chunks", "1", "--chunk-idx", "0", "--temperature", "0.2", "--dynamic"],
+            "env": {
+                "PYTHONPATH": ".",
+                "CUDA_VISIBLE_DEVICES": "2",
+            },
+            "justMyCode": false
+        },
+        {
             "name": "Launch train_hybrid.py",
             "type": "debugpy",
             "request": "launch",
             "program": "/data/yingyueli/miniconda3/envs/matvlm/lib/python3.10/site-packages/accelerate/commands/launch.py",
             "args": [
-                "--main_process_port", "8888",
-                "--config_file", "multi_gpu.yaml",
+                "--main_process_port",
+                "8888",
+                "--config_file",
+                "multi_gpu.yaml",
                 "train_internvl_mamba2/train_hybrid.py",
                 "mamba2_internvl/internvl_0.25_mamba2_665k.yaml"
             ],
             "env": {
-              "CUDA_VISIBLE_DEVICES": "0",
-              "ACCELERATE_LOG_LEVEL": "info",
-              "PYTHONPATH": "."
+                "CUDA_VISIBLE_DEVICES": "1",
+                "ACCELERATE_LOG_LEVEL": "info",
+                "PYTHONPATH": "."
             },
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",

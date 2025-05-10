@@ -17,6 +17,7 @@ from einops import rearrange
 
 from internvl.model.internlm2.modeling_internlm2 import InternLM2RMSNorm
 
+import torch.nn.functional as F
 class PhiMLP(nn.Module):
     def __init__(self, d_model, intermediate_size, hidden_act, device=None, dtype=None,):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -489,7 +490,9 @@ class InternLM2MHA(MHA):
                     q, kv, seqlen_offset=seqlen_offset, max_seqlen=rotary_max_seqlen
                 )
             if inference_params is None:
-                k, v = kv.unbind(dim=-3)
+                k, v = kv.unbind(dim=-3)                
+                k = torch.repeat_interleave(k, dim=2, repeats=self.num_heads // self.num_heads_kv)
+                v = torch.repeat_interleave(v, dim=2, repeats=self.num_heads // self.num_heads_kv)
                 context = F.scaled_dot_product_attention(
                     q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=self.causal, scale=self.softmax_scale
                 ).transpose(1, 2)
@@ -503,6 +506,39 @@ class InternLM2MHA(MHA):
         out = self.out_proj(context)
         return out
 
+    def _update_kvcache_attention(self, q, kv, inference_params):
+        """Write kv to inference_params, then do attention"""
+        if (
+            inference_params.seqlen_offset == 0
+            or flash_attn_with_kvcache is None
+        ):
+            # TODO: this only uses seqlen_offset and not lengths_per_sample.
+            kv = self._update_kv_cache(kv, inference_params)
+            k, v = kv.unbind(dim=-3)
+            k = torch.repeat_interleave(k, dim=2, repeats=self.num_heads // self.num_heads_kv)
+            v = torch.repeat_interleave(v, dim=2, repeats=self.num_heads // self.num_heads_kv)
+            return F.scaled_dot_product_attention(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=self.causal, scale=self.softmax_scale
+            ).transpose(1, 2)
+        else:
+            batch = q.shape[0]
+            kv_cache = inference_params.key_value_memory_dict[self.layer_idx][:batch]
+            cache_seqlens = (
+                inference_params.lengths_per_sample[:batch]
+                if inference_params.lengths_per_sample is not None
+                else inference_params.seqlen_offset
+            )
+            return flash_attn_with_kvcache(
+                q,
+                kv_cache[:, :, 0],
+                kv_cache[:, :, 1],
+                kv[:, :, 0],
+                kv[:, :, 1],
+                cache_seqlens=cache_seqlens,
+                softmax_scale=self.softmax_scale,
+                causal=self.causal,
+            )
+
 class InternLM2MHADecoderLayer(nn.Module):
     def __init__(
         self,
@@ -512,7 +548,7 @@ class InternLM2MHADecoderLayer(nn.Module):
         dtype=None,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
-        super(MHADecoderLayer, self).__init__()
+        super(InternLM2MHADecoderLayer, self).__init__()
         self.layer_idx = layer_idx
         self.mha = InternLM2MHA(
             embed_dim=config.hidden_size,
@@ -528,9 +564,9 @@ class InternLM2MHADecoderLayer(nn.Module):
             device=device,
             dtype=dtype,
         )
-        self.mlp = InternLM2MLP(config, config.hidden_size)
-        self.input_layernorm = InternLM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = InternLM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.feed_forward = InternLM2MLP(config, config.hidden_size)
+        self.attention_norm = InternLM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.ffn_norm = InternLM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.residual_in_fp32 = True
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
@@ -538,13 +574,13 @@ class InternLM2MHADecoderLayer(nn.Module):
     
     def forward(self, hidden_states: Tensor, inference_params=None, *args, **kwargs):
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.attention_norm(hidden_states)
         hidden_states = self.mha(hidden_states, inference_params)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.ffn_norm(hidden_states)
+        hidden_states = self.feed_forward(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
 

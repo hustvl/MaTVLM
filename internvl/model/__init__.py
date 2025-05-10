@@ -8,6 +8,7 @@ import math
 
 import torch
 from internvl.model.internvl_chat import InternVLChatConfig, InternVLChatModel, HybridInternVLChatModel
+from mamba2_inference.hybrid_wrapper_internvl import EvalMamba2TransformerHybridModelWrapper
 from transformers import AutoTokenizer
 
 
@@ -46,9 +47,10 @@ def load_model_and_tokenizer(args):
     model = HybridInternVLChatModel.from_pretrained(
         args.checkpoint, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16,
         load_in_8bit=args.load_in_8bit, load_in_4bit=args.load_in_4bit, **kwargs).eval()
-    model.language_model = EvalMamba2TransformerHybridModelWrapper.from_pretrained(
-                args.checkpoint, torch_dtype=torch.float16, attn_implementation='flash_attention_2'
-            )
+    if "MaTVLM" in args.checkpoint:
+        model.language_model = EvalMamba2TransformerHybridModelWrapper.from_pretrained(
+                    args.checkpoint, model.language_model, torch_dtype=torch.bfloat16, attn_implementation='flash_attention_2'
+                )
     if not args.load_in_8bit and not args.load_in_4bit and not args.auto:
         model = model.cuda()
     return model, tokenizer

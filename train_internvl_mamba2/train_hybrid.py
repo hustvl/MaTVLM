@@ -1116,7 +1116,7 @@ def main():
 
     # Freeze all non mamba parameters in student  model
     for name, param in student_model.named_parameters():
-        if f"mamba" not in name and (f"connector" not in name or not training_args.tune_mlp):
+        if f"mamba" not in name and (f"mlp1" not in name or not training_args.tune_mlp):
             param.requires_grad = False
 
     if accelerator.is_main_process:
