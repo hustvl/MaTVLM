@@ -1,5 +1,5 @@
 model_name: OpenGVLab/InternVL2_5-8B
-ssm_layers: [0, 4, 8, 12, 16, 20]
+ssm_layers: [0, 4, 8, 12, 16, 20, 24, 28]
 kl_weight: 1
 tl_weight: 1
 sl_weight: 0
