@@ -444,3 +444,170 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 conv_state.zero_()
                 ssm_state.zero_()
         return conv_state, ssm_state
+
+
+class InternLM2Mamba2(Mamba2):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, u, seqlen=None, seq_idx=None, cu_seqlens=None, inference_params=None):
+        """
+        u: (batch, seqlen, hidden_dim) if seqlen=None.
+            If seqlen is not None, u is (batch * seqlen, hidden_dim). This is so that when we
+            split u during sequence parallel, we split the batch * seqlen dimension
+            (in case batch is small).
+        Returns: same shape as u
+        """
+        seqlen_og = seqlen
+        if seqlen is None:
+            batch, seqlen, dim = u.shape
+        else:
+            batch_seqlen, dim = u.shape
+            batch = batch_seqlen // seqlen
+
+        conv_state, ssm_state = None, None
+        if inference_params is not None:
+            inference_batch = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else batch
+            conv_state, ssm_state = self._get_states_from_cache(inference_params, inference_batch)
+            if inference_params.seqlen_offset > 0:
+                # The states are updated inplace
+                out, _, _ = self.step(u, conv_state, ssm_state)
+                return out
+
+        zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
+        if seqlen_og is not None:
+            zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
+        # If the model is loaded in fp16, without the .float() here, A might be -inf
+        A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
+        dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
+        
+        # [z, x, B, C, dt]
+        d_mlp = (zxbcdt.shape[-1] - 2 * self.d_inner - 2 * self.d_xb - self.nheads) // 2
+        z0, x0, z, xBC, dt = torch.split(
+            zxbcdt,
+            [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.d_xb, self.nheads],
+            dim=-1
+        )
+
+        if self.repeat_kv_before_conv:
+            x, B, C = torch.split(xBC, [self.d_xb, self.d_xb, self.ngroups * self.d_state], dim=-1)
+            # minic the GQA
+            x = rearrange(x, "b l (xb_group dstate) -> b xb_group l dstate", dstate=self.d_state)
+            x = repeat_kv(x, self.repeat_group)
+            # x shape: (bsz, n_group, l, dim)
+            B = rearrange(B, "b l (xb_group dstate) -> b xb_group l dstate", dstate=self.d_state)
+            B = repeat_kv(B, self.repeat_group)
+            # combine x, B, C
+            x = rearrange(x, "b g l p -> b l (g p)")
+            B = rearrange(B, "b g l p -> b l (g p)")
+            xBC = torch.cat((x, B, C), dim=-1)
+
+        if conv_state is not None:
+            if cu_seqlens is None:
+                # If we just take xBC[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
+                # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
+                xBC_t = rearrange(xBC, "b l d -> b d l")
+                conv_state.copy_(F.pad(xBC_t, (self.d_conv - xBC_t.shape[-1], 0)))  # Update state (B D W)
+            else:
+                assert causal_conv1d_varlen_states is not None, "varlen inference requires causal_conv1d package"
+                assert batch == 1, "varlen inference only supports batch dimension 1"
+                conv_varlen_states = causal_conv1d_varlen_states(
+                    xBC.squeeze(0), cu_seqlens, state_len=conv_state.shape[-1]
+                )
+                conv_state.copy_(conv_varlen_states)
+        assert self.activation in ["silu", "swish"]
+
+        if causal_conv1d_fn is None or self.activation not in ["silu", "swish"]:
+            assert seq_idx is None, "varlen conv1d requires the causal_conv1d package"
+            xBC = self.act(
+                self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)[:, -(self.dconv - 1):]
+            )  # (B, L, self.d_ssm + 2 * ngroups * d_state)
+        else:
+            xBC = causal_conv1d_fn(
+                xBC.transpose(1, 2),
+                rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                bias=self.conv1d.bias,
+                activation=self.activation,
+                seq_idx=seq_idx,
+            ).transpose(1, 2)
+        
+        if self.repeat_kv_before_conv:
+            x, B, C = torch.split(xBC, [self.ngroups * self.d_state, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
+
+            y = mamba_chunk_scan_combined(
+                rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
+                dt,
+                A,
+                rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
+                rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
+                chunk_size=self.chunk_size,
+                D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
+                z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
+                dt_bias=self.dt_bias,
+                dt_softplus=True,
+                seq_idx=seq_idx,
+                cu_seqlens=cu_seqlens,
+                **dt_limit_kwargs,
+                return_final_states=ssm_state is not None,
+                return_varlen_states=cu_seqlens is not None and inference_params is not None,
+            )
+
+        else:
+            xBC = rearrange(
+                xBC,
+                'b q (h gs d) -> b q h gs d',
+                gs=2 + self.repeat_group,
+                d=self.d_state,
+            )
+
+            C = xBC[..., : self.repeat_group, :]
+            C = rearrange(C, 'b q h gs d -> b q (h gs) d')
+            B = xBC[..., -2, :]
+            x = xBC[..., -1, :]
+            # self.d_xb + self.d_xb + self.d_inner
+            # x, B, C = torch.split(xBC, [self.d_xb, self.d_xb, self.ngroups * self.d_state], dim=-1)
+            
+            # minic the GQA
+            x = rearrange(x, "b l xb_group dstate -> b xb_group l dstate", dstate=self.d_state)
+            x = repeat_kv(x, self.repeat_group)
+            # x shape: (bsz, n_group, l, dim)
+            
+            B = rearrange(B, "b l xb_group dstate -> b xb_group l dstate", dstate=self.d_state)
+            B = repeat_kv(B, self.repeat_group)
+
+            y = mamba_chunk_scan_combined(
+                # rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
+                rearrange(x, "b g l p -> b l g p"),
+                dt,
+                A,
+                # rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
+                rearrange(B, "b g l n -> b l g n"),
+                C,
+                chunk_size=self.chunk_size,
+                D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
+                z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
+                dt_bias=self.dt_bias,
+                dt_softplus=True,
+                seq_idx=seq_idx,
+                cu_seqlens=cu_seqlens,
+                **dt_limit_kwargs,
+                return_final_states=ssm_state is not None,
+                return_varlen_states=cu_seqlens is not None and inference_params is not None,
+            )
+
+        if ssm_state is not None:
+            y, last_state, *rest = y
+            if cu_seqlens is None:
+                ssm_state.copy_(last_state)
+            else:
+                varlen_states = rest[0]
+                ssm_state.copy_(varlen_states)
+        y = rearrange(y, "b l h p -> b l (h p)")
+        if self.rmsnorm:
+            y = self.norm(y, z)
+        if d_mlp > 0:
+            y = torch.cat([F.silu(z0) * x0, y], dim=-1)
+        if seqlen_og is not None:
+            y = rearrange(y, "b l d -> (b l) d")
+        out = self.out_proj(y)
+        return out

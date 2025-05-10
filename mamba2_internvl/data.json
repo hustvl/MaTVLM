@@ -1,0 +1,9 @@
+{
+  "sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k": {
+    "root": "playground/data/",
+    "annotation": "playground/data/sharegpt4v_mix665k_cap23k_coco-ap9k_lcs3k_sam9k_div2k.jsonl",
+    "data_augment": false,
+    "repeat_time": 1,
+    "length": 665058
+  }
+}
