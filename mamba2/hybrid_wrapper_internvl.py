@@ -12,9 +12,12 @@ from transformers import AutoModelForCausalLM
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 from transformers.utils.hub import cached_file
 
-from mamba2.hybrid_model import InternLM2MambaDecoderLayer
+from mamba2.hybrid_model import InternLM2MambaDecoderLayer, Qwen2MambaDecoderLayer
 
 from internvl.model.internvl_chat import HybridInternVLChatModel, InternVLChatConfig
+from internvl.model.internlm2.modeling_internlm2 import InternLM2DecoderLayer
+
+from internvl.model.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 
 
 from util import load_safetensors_to_dict
@@ -31,7 +34,7 @@ class InternVLMambaTransformerHybridModelWrapper(nn.Module):
         self.config = self.model.config
         
         for layer_idx in range(mamba_config.n_layer):
-            if layer_idx not in attn_layers:
+            if layer_idx not in attn_layers and isinstance(transformer_model.language_model.model.layers._modules[f'{layer_idx}'], InternLM2DecoderLayer):
                 mamba_encoder = InternLM2MambaDecoderLayer(
                     mamba_config,
                     layer_idx,
@@ -53,6 +56,31 @@ class InternVLMambaTransformerHybridModelWrapper(nn.Module):
                     mamba_encoder.post_attention_layernorm = mamba_encoder.post_attention_layernorm.to(dtype)
 
                 self.model.language_model.model.layers[layer_idx] = mamba_encoder
+            elif layer_idx not in attn_layers and isinstance(transformer_model.language_model.model.layers._modules[f'{layer_idx}'], Qwen2DecoderLayer):
+                mamba_encoder = Qwen2MambaDecoderLayer(
+                    mamba_config,
+                    layer_idx,
+                    device="cuda",
+                    dtype=dtype,
+                )
+                
+                if init_with_kqvo:
+                    # init weights using attention weights
+                    mamba_encoder.mlp.load_state_dict(transformer_model.language_model.model.layers._modules[f'{layer_idx}'].mlp.state_dict())
+                    mamba_encoder.input_layernorm.load_state_dict(transformer_model.language_model.model.layers._modules[f'{layer_idx}'].input_layernorm.state_dict())
+                    mamba_encoder.post_attention_layernorm.load_state_dict(transformer_model.language_model.model.layers._modules[f'{layer_idx}'].post_attention_layernorm.state_dict())
+                    mamba_encoder.mamba.out_proj.weight.data.copy_(transformer_model.language_model.model.layers._modules[f'{layer_idx}'].self_attn.o_proj.weight.data)
+                    # [z, x, B, C, dt]
+                    mamba_encoder.mamba.in_proj.weight.data[mamba_config.d_inner:mamba_config.d_inner+mamba_config.d_xb, :].copy_(transformer_model.language_model.model.layers._modules[f'{layer_idx}'].self_attn.v_proj.weight.data)
+                    mamba_encoder.mamba.in_proj.weight.data[mamba_config.d_inner+mamba_config.d_xb:mamba_config.d_inner+2*mamba_config.d_xb, :].copy_(transformer_model.language_model.model.layers._modules[f'{layer_idx}'].self_attn.k_proj.weight.data)
+                    mamba_encoder.mamba.in_proj.weight.data[mamba_config.d_inner+2*mamba_config.d_xb:2*mamba_config.d_inner+2*mamba_config.d_xb, :].copy_(transformer_model.language_model.model.layers._modules[f'{layer_idx}'].self_attn.q_proj.weight.data)
+
+                    # keep dtype to be the same
+                    mamba_encoder.mlp = mamba_encoder.mlp.to(dtype)
+                    mamba_encoder.input_layernorm = mamba_encoder.input_layernorm.to(dtype)
+                    mamba_encoder.post_attention_layernorm = mamba_encoder.post_attention_layernorm.to(dtype)
+
+                self.model.language_model.model.layers[layer_idx] = mamba_encoder
 
         if checkpoint_path is not None:
             if load_from_hub:
@@ -68,13 +96,6 @@ class InternVLMambaTransformerHybridModelWrapper(nn.Module):
                     self.model.load_state_dict(load_safetensors_to_dict(checkpoint_path))
         
         self.model = self.model.to(dtype).cuda()
-
-    def allocate_mamba_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        return {
-            i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
-            for i, layer in enumerate(self.model.model.layers)
-            if isinstance(layer, MambaDecoderLayer)
-        }
 
     def forward(
         self,

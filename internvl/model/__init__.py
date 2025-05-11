@@ -8,8 +8,12 @@ import math
 
 import torch
 from internvl.model.internvl_chat import InternVLChatConfig, InternVLChatModel, HybridInternVLChatModel
-from mamba2_inference.hybrid_wrapper_internvl import EvalMamba2TransformerHybridModelWrapper
+from mamba2_inference.hybrid_wrapper_internvl import EvalMamba2TransformerHybridModelWrapper, EvalQwen2Mamba2TransformerHybridModelWrapper
 from transformers import AutoTokenizer
+
+from internvl.model.internlm2.modeling_internlm2 import HybridInternLM2ForCausalLM
+from internvl.model.qwen2.modeling_qwen2 import HybridQwen2ForCausalLM
+
 
 
 def split_model(num_layers, vit_alpha=0.5):
@@ -48,9 +52,14 @@ def load_model_and_tokenizer(args):
         args.checkpoint, low_cpu_mem_usage=True, torch_dtype=torch.bfloat16,
         load_in_8bit=args.load_in_8bit, load_in_4bit=args.load_in_4bit, **kwargs).eval()
     if "MaTVLM" in args.checkpoint:
-        model.language_model = EvalMamba2TransformerHybridModelWrapper.from_pretrained(
-                    args.checkpoint, model.language_model, torch_dtype=torch.bfloat16, attn_implementation='flash_attention_2'
-                )
+        if isinstance(model.language_model, HybridInternLM2ForCausalLM):
+            model.language_model = EvalMamba2TransformerHybridModelWrapper.from_pretrained(
+                        args.checkpoint, model.language_model, torch_dtype=torch.bfloat16, attn_implementation='flash_attention_2'
+                    )
+        elif isinstance(model.language_model, HybridQwen2ForCausalLM):
+            model.language_model = EvalQwen2Mamba2TransformerHybridModelWrapper.from_pretrained(
+                        args.checkpoint, model.language_model, torch_dtype=torch.bfloat16, attn_implementation='flash_attention_2'
+                    )
     if not args.load_in_8bit and not args.load_in_4bit and not args.auto:
         model = model.cuda()
     return model, tokenizer

@@ -17,7 +17,8 @@ from internvl.model.phi3.modeling_phi3 import Phi3ForCausalLM
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from transformers import (AutoModel, GenerationConfig, LlamaForCausalLM,
-                          LlamaTokenizer, Qwen2ForCausalLM)
+                          LlamaTokenizer)
+from internvl.model.qwen2.modeling_qwen2 import Qwen2ForCausalLM, HybridQwen2ForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
@@ -452,8 +453,17 @@ class InternVLChatModel(PreTrainedModel):
 class HybridInternVLChatModel(InternVLChatModel):
     def __init__(self, config: InternVLChatConfig, vision_model=None, language_model=None, use_flash_attn=True):
         super().__init__(config, vision_model, language_model, use_flash_attn)
-        self.language_model = HybridInternLM2ForCausalLM(config.llm_config)
 
+        if config.llm_config.architectures[0] == 'LlamaForCausalLM':
+            self.language_model = LlamaForCausalLM(config.llm_config)
+        elif config.llm_config.architectures[0] == 'InternLM2ForCausalLM':
+            self.language_model = HybridInternLM2ForCausalLM(config.llm_config)
+        elif config.llm_config.architectures[0] == 'Phi3ForCausalLM':
+            self.language_model = Phi3ForCausalLM(config.llm_config)
+        elif config.llm_config.architectures[0] == 'Qwen2ForCausalLM':
+            self.language_model = HybridQwen2ForCausalLM(config.llm_config)
+        else:
+            raise NotImplementedError(f'{config.llm_config.architectures[0]} is not implemented.')
     def forward(
             self,
             pixel_values: torch.FloatTensor,

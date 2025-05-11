@@ -18,9 +18,12 @@ from transformers.utils.hub import cached_file
 from transformers.models.phi.modeling_phi import PhiDecoderLayer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
-from mamba2_inference.hybrid_model import MambaDecoderLayer, InternLM2MHADecoderLayer, InternLM2MambaDecoderLayer
+from mamba2_inference.hybrid_model import MambaDecoderLayer, InternLM2MHADecoderLayer, InternLM2MambaDecoderLayer, Qwen2MambaDecoderLayer, Qwen2MHADecoderLayer
 from util import load_safetensors_to_dict
 from collections import namedtuple
+
+from internvl.model.internlm2.modeling_internlm2 import InternLM2DecoderLayer
+from internvl.model.qwen2.modeling_qwen2 import Qwen2DecoderLayer
 
 from mamba2.hybrid_mamba_config import MambaConfig, PhiMambaConfig
 from typing import List, Optional, Tuple, Union
@@ -64,6 +67,64 @@ def merge_projections_for_layers(checkpoint, layer_indices):
             out_proj_key = f"model.layers.{layer_idx}.mha.out_proj.weight"
             checkpoint[out_proj_key] = checkpoint[wo_key]
             del checkpoint[wo_key]
+
+    return checkpoint
+
+
+def merge_projections_for_qwen2_layers(checkpoint, layer_indices):
+    for layer_idx in layer_indices:
+        # Get the weights for q_proj, k_proj, and v_proj
+        q_proj_key = f"model.layers.{layer_idx}.self_attn.q_proj.weight"
+        q_proj_bias_key = f"model.layers.{layer_idx}.self_attn.q_proj.bias"
+        k_proj_key = f"model.layers.{layer_idx}.self_attn.k_proj.weight"
+        k_proj_bias_key = f"model.layers.{layer_idx}.self_attn.k_proj.bias"
+        v_proj_key = f"model.layers.{layer_idx}.self_attn.v_proj.weight"
+        v_proj_bias_key = f"model.layers.{layer_idx}.self_attn.v_proj.bias"
+        o_proj_key = f"model.layers.{layer_idx}.self_attn.o_proj.weight"
+
+        # Check if the keys exist in the checkpoint
+        if q_proj_key in checkpoint and k_proj_key in checkpoint and v_proj_key in checkpoint:
+            # Assuming all the projections have the same shape, otherwise adjust accordingly
+            q_proj_weight = checkpoint[q_proj_key]
+            k_proj_weight = checkpoint[k_proj_key]
+            v_proj_weight = checkpoint[v_proj_key]
+
+            # Concatenate the weights along the first dimension (often dimension 0)
+            in_proj_weight = torch.cat([q_proj_weight, k_proj_weight, v_proj_weight], dim=0)
+
+            # Assign the new weight to the corresponding in_proj key
+            in_proj_key = f"model.layers.{layer_idx}.mha.in_proj.weight"
+            checkpoint[in_proj_key] = in_proj_weight
+
+            # Optionally, remove the old keys to clean up the checkpoint
+            del checkpoint[q_proj_key]
+            del checkpoint[k_proj_key]
+            del checkpoint[v_proj_key]
+
+        if q_proj_bias_key in checkpoint and k_proj_bias_key in checkpoint and v_proj_bias_key in checkpoint:
+            # Assuming all the projections have the same shape, otherwise adjust accordingly
+            q_proj_bias = checkpoint[q_proj_bias_key]
+            k_proj_bias = checkpoint[k_proj_bias_key]
+            v_proj_bias = checkpoint[v_proj_bias_key]
+
+            # Concatenate the weights along the first dimension (often dimension 0)
+            in_proj_bias = torch.cat([q_proj_bias, k_proj_bias, v_proj_bias], dim=0)
+
+            # Assign the new weight to the corresponding in_proj key
+            in_proj_bias_key = f"model.layers.{layer_idx}.mha.in_proj.bias"
+            checkpoint[in_proj_bias_key] = in_proj_bias
+
+            # Optionally, remove the old keys to clean up the checkpoint
+            del checkpoint[q_proj_bias_key]
+            del checkpoint[k_proj_bias_key]
+            del checkpoint[v_proj_bias_key]
+        if o_proj_key in checkpoint:
+            out_proj_key = f"model.layers.{layer_idx}.mha.out_proj.weight"
+            checkpoint[out_proj_key] = checkpoint[o_proj_key]
+            del checkpoint[o_proj_key]
+
+    return checkpoint
+
 
     return checkpoint
 
@@ -348,3 +409,53 @@ class EvalMamba2TransformerHybridModelWrapper(nn.Module):
     
     def resize_token_embeddings(self, new_num_tokens: Optional[int] = None, pad_to_multiple_of=None) -> nn.Embedding:
         return  self.model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)        
+
+
+class EvalQwen2Mamba2TransformerHybridModelWrapper(EvalMamba2TransformerHybridModelWrapper):
+
+    def __init__(self, checkpoint_path, transformer_model, mamba_config, attn_layers, dtype, load_from_hub=False, **kwargs):
+        self.mamba_config = mamba_config
+        self.attn_layers = attn_layers
+        self.model = transformer_model
+        self.config = self.model.config
+        
+        for layer_idx in range(mamba_config.n_layer):
+            if layer_idx in attn_layers:
+                layer_encoder = Qwen2MHADecoderLayer(
+                    self.config,
+                    layer_idx,
+                    device="cuda",
+                    dtype=dtype,
+                )
+            else:
+                layer_encoder = Qwen2MambaDecoderLayer(
+                    mamba_config,
+                    layer_idx,
+                    device="cuda",
+                    dtype=dtype,
+                    )
+            self.model.model.layers[layer_idx] = layer_encoder
+            
+        print("self.model:", self.model)      
+           
+        if checkpoint_path is not None:
+            if load_from_hub:
+                # load from a huggingface hub
+                ckpt = load_state_dict_hf(checkpoint_path, device=torch.device("cpu"), dtype=dtype)
+            else:
+                # load from a local directory
+                if os.path.exists(f"{checkpoint_path}/pytorch_model.bin"):
+                    # support save from bin file
+                    ckpt = torch.load(f"{checkpoint_path}/pytorch_model.bin", map_location=torch.device("cpu"))
+                else:
+                    # support save from safetensors
+                    ckpt = load_safetensors_to_dict(checkpoint_path)
+        
+        keys = list(ckpt.keys())
+        for k in keys:
+            if "language_model" in k:
+                ckpt[k.replace("language_model.model", "model")] = ckpt.pop(k)
+
+        merge_projections_for_qwen2_layers(ckpt, self.attn_layers)
+        self.model.load_state_dict(ckpt, strict=False) # without lm_heads
+        self.model = self.model.to(dtype).cuda()

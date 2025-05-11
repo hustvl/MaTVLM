@@ -17,6 +17,8 @@ from einops import rearrange
 
 from internvl.model.internlm2.modeling_internlm2 import InternLM2RMSNorm
 
+from internvl.model.qwen2.modeling_qwen2 import Qwen2RMSNorm
+
 import torch.nn.functional as F
 class PhiMLP(nn.Module):
     def __init__(self, d_model, intermediate_size, hidden_act, device=None, dtype=None,):
@@ -581,6 +583,100 @@ class InternLM2MHADecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.ffn_norm(hidden_states)
         hidden_states = self.feed_forward(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+class Qwen2MLP(nn.Module):
+    def __init__(self, config, hidden_size):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, hidden_state):
+        return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
+
+class Qwen2MambaDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        config: MambaConfig,
+        layer_idx: int,
+        device=None,
+        dtype=None,
+        residual_in_fp32=True,
+    ):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.layer_idx = layer_idx
+        self.mamba = Mamba2(
+            d_model=config.d_model, d_xb=config.d_xb, d_inner=config.d_inner, layer_idx=layer_idx, **config.ssm_cfg, **factory_kwargs
+        )
+        self.mlp = Qwen2MLP(config, config.d_model)
+        self.input_layernorm = Qwen2RMSNorm(config.d_model, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen2RMSNorm(config.d_model, eps=config.rms_norm_eps)
+
+        
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return self.mamba.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+
+    def forward(self, hidden_states: Tensor, inference_params=None, *args, **kwargs):
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.mamba(hidden_states, inference_params=inference_params)
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states
+
+class Qwen2MHADecoderLayer(nn.Module):
+    def __init__(
+        self,
+        config,
+        layer_idx: int,
+        device=None,
+        dtype=None,
+    ):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super(Qwen2MHADecoderLayer, self).__init__()
+        self.layer_idx = layer_idx
+        self.mha = MHA(
+            embed_dim=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_heads_kv=config.num_key_value_heads,
+            layer_idx=layer_idx,
+            mlp_dim=0,
+            qkv_proj_bias=False,
+            out_proj_bias=False,
+            rotary_emb_dim=config.hidden_size//config.num_attention_heads,
+            rotary_emb_base=config.rope_theta,
+            causal=True,
+            device=device,
+            dtype=dtype,
+        )
+        self.mlp = Qwen2MLP(config, config.hidden_size)
+        self.input_laryernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.residual_in_fp32 = True
+
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return self.mha.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+    
+    def forward(self, hidden_states: Tensor, inference_params=None, *args, **kwargs):
+        residual = hidden_states
+        hidden_states = self.input_laryernorm(hidden_states)
+        hidden_states = self.mha(hidden_states, inference_params)
+        hidden_states = residual + hidden_states
+
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
 
