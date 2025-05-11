@@ -450,6 +450,77 @@ class InternLM2Mamba2(Mamba2):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+    def step(self, hidden_states, conv_state, ssm_state):
+        dtype = hidden_states.dtype
+        assert hidden_states.shape[1] == 1, "Only support decoding with 1 token at a time for now"
+        zxbcdt = self.in_proj(hidden_states.squeeze(1))  # (B 2D)
+        d_mlp = (zxbcdt.shape[-1] - 2 * self.d_inner - 2 * self.d_xb - self.nheads) // 2
+        z0, x0, z, xBC, dt = torch.split(
+            zxbcdt,
+            [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.d_xb, self.nheads],
+            dim=-1
+        )
+
+        # Conv step
+        if causal_conv1d_update is None:
+            conv_state.copy_(torch.roll(conv_state, shifts=-1, dims=-1))  # Update state (B D W)
+            conv_state[:, :, -1] = xBC
+            xBC = torch.sum(conv_state * rearrange(self.conv1d.weight, "d 1 w -> d w"), dim=-1)  # (B D)
+            if self.conv1d.bias is not None:
+                xBC = xBC + self.conv1d.bias
+            xBC = self.act(xBC).to(dtype=dtype)
+        else:
+            xBC = causal_conv1d_update(
+                xBC,
+                conv_state,
+                rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                self.conv1d.bias,
+                self.activation,
+            )
+
+        A = -torch.exp(self.A_log.float())  # (nheads,)
+
+        xBC = rearrange(
+            xBC,
+            'b (h gs d) -> b h gs d',
+            gs=2 + self.repeat_group,
+            d=self.d_state,
+        )
+
+        C = xBC[..., : self.repeat_group, :]
+        C = rearrange(C, 'b h gs d -> b (h gs) d')
+        B = xBC[..., -2, :]
+        x = xBC[..., -1, :]
+        
+        # minic the GQA
+        x_reshaped = torch.repeat_interleave(x, dim=1, repeats=self.repeat_group)
+
+        B = torch.repeat_interleave(B, dim=1, repeats=self.repeat_group)
+        
+        # SSM step
+        assert selective_state_update is not None
+            
+        A = repeat(A, "h -> h p n", p=self.headdim, n=self.d_state).to(dtype=torch.float32)
+        dt = repeat(dt, "b h -> b h p", p=self.headdim)
+        dt_bias = repeat(self.dt_bias, "h -> h p", p=self.headdim)
+        D = repeat(self.D, "h -> h p", p=self.headdim)
+        # B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
+        # x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
+        if not self.rmsnorm:
+            z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
+        y = selective_state_update(
+            ssm_state, x_reshaped, dt, A, B, C, D, z=z if not self.rmsnorm else None,
+            dt_bias=dt_bias, dt_softplus=True
+        )
+        y = rearrange(y, "b h p -> b (h p)")
+
+        if self.rmsnorm:
+            y = self.norm(y, z)
+        if d_mlp > 0:
+            y = torch.cat([F.silu(z0) * x0, y], dim=-1)
+        out = self.out_proj(y)
+        return out.unsqueeze(1), conv_state, ssm_state
+
     def forward(self, u, seqlen=None, seq_idx=None, cu_seqlens=None, inference_params=None):
         """
         u: (batch, seqlen, hidden_dim) if seqlen=None.
