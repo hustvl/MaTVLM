@@ -102,12 +102,6 @@ def eval_model(args):
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
     ans_file = open(answers_file, "w")
-
-    if args.meta_file is not None:
-        meta = json.load(open(args.meta_file))
-    else:
-        meta = None
-
     for index, row in tqdm(questions.iterrows(), total=len(questions)):
         options = get_options(row, all_options)
         cur_option_char = all_options[:len(options)]
@@ -127,21 +121,6 @@ def eval_model(args):
                 question = question + '\n' + option_char + '. ' + option
             qs = cur_prompt = question
 
-            meta_data = {}
-            if meta is not None:
-                assert image_file in meta, f"Image {image_file} not found in the meta data."
-                objects = meta[image_file]                    
-                if len(objects) > 0:
-                    for seg in objects:
-                        category = seg["category"]
-                        if category not in meta_data.keys():
-                            meta_data[category] = []
-                        meta_data[category].append(seg["bbox"] + [seg['depth']])
-                    meta_prompt = "Provide the positional information for the mentioned objects, specifying their x and y coordinates, width, and height, with the origin at the top-left corner (0,0), as well as their depth value: "
-
-            if len(meta_data) > 0:                      
-                qs = meta_prompt + str(meta_data) + ".\n" + qs
-
             if args.single_pred_prompt:
                 if args.lang == 'cn':
                     qs = qs + '\n' + "请直接回答选项字母。"
@@ -151,10 +130,8 @@ def eval_model(args):
             pixel_values = load_image(image, use_thumbnail, image_size).cuda().to(torch.bfloat16)
 
             generation_config = dict(
-                do_sample=args.sample,
                 top_k=args.top_k,
                 top_p=args.top_p,
-                num_beams=args.num_beams,
                 max_new_tokens=1024,
                 eos_token_id=tokenizer.eos_token_id,
             )
@@ -193,12 +170,11 @@ if __name__ == "__main__":
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--top_p", type=float, default=None)
+    parser.add_argument("--top_p", type=float, default=0.0)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--all-rounds", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
     parser.add_argument("--lang", type=str, default="en")
-    parser.add_argument("--meta-file", type=str, default=None)
     parser.add_argument('--load-in-8bit', action='store_true')
     parser.add_argument('--load-in-4bit', action='store_true')
     parser.add_argument('--auto', action='store_true')

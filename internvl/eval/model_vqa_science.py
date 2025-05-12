@@ -5,14 +5,11 @@ import json
 from tqdm import tqdm
 import shortuuid
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.conversation import conv_templates, SeparatorStyle
-from llava.model.builder import load_pretrained_model
-from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
-
+from internvl.model import load_model_and_tokenizer
+from internvl.train.dataset import build_transform, dynamic_preprocess
 from PIL import Image
 import math
+import re
 
 
 def split_list(lst, n):
@@ -26,12 +23,67 @@ def get_chunk(lst, n, k):
     return chunks[k]
 
 
+def is_none(value):
+    if value is None:
+        return True
+    if type(value) is float and math.isnan(value):
+        return True
+    if type(value) is str and value.lower() == 'nan':
+        return True
+    if type(value) is str and value.lower() == 'none':
+        return True
+    return False
+
+def get_options(row, options):
+    parsed_options = []
+    for option in options:
+        option_value = row[option]
+        if is_none(option_value):
+            break
+        parsed_options.append(option_value)
+    return parsed_options
+def post_processing(response):
+    response = response.replace('\n', '').replace('不是', 'No').replace('是', 'Yes').replace('否', 'No')
+    response = response.lower().replace('true', 'yes').replace('false', 'no')
+    pattern = re.compile(r'[\u4e00-\u9fa5]')
+    response = re.sub(pattern, '', response)
+    return response
+
+
+def load_image(image, use_thumbnail, input_size=224):
+    transform = build_transform(is_train=False, input_size=input_size)
+    if args.dynamic:
+        images = dynamic_preprocess(image, image_size=input_size,
+                                    use_thumbnail=use_thumbnail,
+                                    max_num=args.max_num)
+    else:
+        images = [image]
+    pixel_values = [transform(image) for image in images]
+    pixel_values = torch.stack(pixel_values)
+    return pixel_values
+
+def disable_torch_init():
+    """
+    Disable the redundant torch default initialization to accelerate model creation.
+    """
+    setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
+    setattr(torch.nn.LayerNorm, "reset_parameters", lambda self: None)
+
+def get_model_name_from_path(model_path):
+    model_path = model_path.strip("/")
+    model_paths = model_path.split("/")
+    if model_paths[-1].startswith('checkpoint-'):
+        return model_paths[-2] + "_" + model_paths[-1]
+    else:
+        return model_paths[-1]
 def eval_model(args):
     # Model
     disable_torch_init()
-    model_path = os.path.expanduser(args.model_path)
+    model_path = os.path.expanduser(args.checkpoint)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
+    model, tokenizer = load_model_and_tokenizer(args)
+    image_size = model.config.force_image_size or model.config.vision_config.image_size
+    use_thumbnail = model.config.use_thumbnail
 
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -44,49 +96,30 @@ def eval_model(args):
         qs = question['value'].replace('<image>', '').strip()
         cur_prompt = qs
 
-        if 'image' in line:
-            image_file = line["image"]
-            image = Image.open(os.path.join(args.image_folder, image_file))
-            image_tensor = process_images([image], image_processor, model.config)[0]
-            images = image_tensor.unsqueeze(0).half().cuda()
-            image_sizes = [image.size]
-            if getattr(model.config, 'mm_use_im_start_end', False):
-                qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-            else:
-                qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
-            cur_prompt = '<image>' + '\n' + cur_prompt
-        else:
-            images = None
-            image_sizes = None
+        image_file = line["image"]
+        image = Image.open(os.path.join(args.image_folder, image_file))
 
-        if args.single_pred_prompt:
-            qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
-            cur_prompt = cur_prompt + '\n' + "Answer with the option's letter from the given choices directly."
 
-        conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+        pixel_values = load_image(image, use_thumbnail, image_size).cuda().to(torch.bfloat16)
 
-        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
-
-        with torch.inference_mode():
-            output_ids = model.generate(
-                input_ids,
-                images=images,
-                image_sizes=image_sizes,
-                do_sample=True if args.temperature > 0 else False,
-                temperature=args.temperature,
-                max_new_tokens=1024,
-                use_cache=True,
-            )
-
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
-
+        generation_config = dict(
+            top_k=args.top_k,
+            top_p=args.top_p,
+            max_new_tokens=1024,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        response = model.chat(
+            tokenizer=tokenizer,
+            pixel_values=pixel_values,
+            question=qs,
+            generation_config=generation_config,
+            verbose=True
+        )
+        response = post_processing(response)
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,
                                    "prompt": cur_prompt,
-                                   "text": outputs,
+                                    "text": response,
                                    "answer_id": ans_id,
                                    "model_id": model_name,
                                    "metadata": {}}) + "\n")
@@ -95,17 +128,25 @@ def eval_model(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
-    parser.add_argument("--model-base", type=str, default=None)
+    parser.add_argument("--checkpoint", type=str, default="facebook/opt-350m")
     parser.add_argument("--image-folder", type=str, default="")
     parser.add_argument("--question-file", type=str, default="tables/question.json")
     parser.add_argument("--answers-file", type=str, default="answer.jsonl")
-    parser.add_argument("--conv-mode", type=str, default="llava_v0")
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--answer-prompter", action="store_true")
+    parser.add_argument("--top_p", type=float, default=0.0)
+    parser.add_argument("--num_beams", type=int, default=1)
+    parser.add_argument("--all-rounds", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
+    parser.add_argument("--lang", type=str, default="en")
+    parser.add_argument('--load-in-8bit', action='store_true')
+    parser.add_argument('--load-in-4bit', action='store_true')
+    parser.add_argument('--auto', action='store_true')
+    parser.add_argument('--top-k', type=int, default=50)
+    parser.add_argument('--sample', type=bool, default=False)
+    parser.add_argument('--dynamic', action='store_true')
+    parser.add_argument('--max-num', type=int, default=6)
     args = parser.parse_args()
 
     eval_model(args)

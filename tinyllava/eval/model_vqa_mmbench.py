@@ -113,7 +113,7 @@ def eval_model(args):
                 images=image_tensor.unsqueeze(0).to(dtype=torch.float16, device='cuda', non_blocking=True),
                 temperature=args.temperature,
                 top_p=args.top_p,
-                max_new_tokens1024,
+                max_new_tokens=1024,
                 # stopping_criteria=[stopping_criteria],
                 image_sizes=[image.size],
                 eos_token_id = tokenizer.eos_token_id)
