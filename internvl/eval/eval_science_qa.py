@@ -62,9 +62,9 @@ if __name__ == "__main__":
             pred = predictions[prob_id]
             pred_text = pred['text']
 
-        if pred_text in args.options:
+        if pred_text.upper() in args.options:
             answer = pred_text
-        elif len(pred_text) >= 3 and pred_text[0] in args.options and pred_text[1:3] == ". ":
+        elif len(pred_text) >= 3 and pred_text[0].upper() in args.options and pred_text[1:3] == ". ":
             answer = pred_text[0]
         else:
             pattern = re.compile(r'The answer is ([A-Z]).')
@@ -72,8 +72,10 @@ if __name__ == "__main__":
             if len(res) == 1:
                 answer = res[0]  # 'A', 'B', ...
             else:
+                print(pred_text)
                 answer = "FAILED"
 
+        answer = answer.upper()
         pred_idx = get_pred_idx(answer, prob['choices'], args.options)
 
         analysis = {
@@ -102,7 +104,7 @@ if __name__ == "__main__":
     multimodal_total = multimodal_correct + multimodal_incorrect
     ###### IMG ######
 
-    print(f'Total: {total}, Correct: {correct}, Accuracy: {correct / total * 100:.2f}%, IMG-Accuracy: {multimodal_correct / multimodal_total * 100:.2f}%')
+    print(f'Total: {total}, Correct: {correct}, Accuracy: {correct / total * 100:.2f}%, Img-Total: {multimodal_total}, IMG-Accuracy: {multimodal_correct / multimodal_total * 100:.2f}%')
 
     sqa_results['acc'] = correct / total * 100
     sqa_results['correct'] = correct

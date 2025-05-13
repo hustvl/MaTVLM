@@ -119,11 +119,10 @@ def eval_model(args):
                 question = question + '\n' + option_char + '. ' + option
             qs = cur_prompt = question
 
-            if args.single_pred_prompt:
-                if args.lang == 'cn':
-                    qs = qs + '\n' + "请直接回答选项字母。"
-                else:
-                    qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
+            if args.lang == 'cn':
+                qs = qs + '\n' + "请直接回答选项字母。"
+            else:
+                qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
 
             pixel_values = load_image(image, use_thumbnail, image_size).cuda().to(torch.bfloat16)
 

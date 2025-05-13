@@ -94,8 +94,10 @@ def eval_model(args):
         idx = line["id"]
         question = line['conversations'][0]
         qs = question['value'].replace('<image>', '').strip()
-        cur_prompt = qs
 
+        qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
+        if "image" not in line:
+            continue
         image_file = line["image"]
         image = Image.open(os.path.join(args.image_folder, image_file))
 
@@ -118,7 +120,7 @@ def eval_model(args):
         response = post_processing(response)
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,
-                                   "prompt": cur_prompt,
+                                   "prompt": question['value'],
                                     "text": response,
                                    "answer_id": ans_id,
                                    "model_id": model_name,

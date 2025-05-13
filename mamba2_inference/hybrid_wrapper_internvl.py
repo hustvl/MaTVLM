@@ -411,9 +411,10 @@ class EvalMamba2TransformerHybridModelWrapper(nn.Module):
         return  self.model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)        
 
 
-class EvalQwen2Mamba2TransformerHybridModelWrapper(EvalMamba2TransformerHybridModelWrapper):
+class EvalQwen2Mamba2TransformerHybridModelWrapper(nn.Module):
 
     def __init__(self, checkpoint_path, transformer_model, mamba_config, attn_layers, dtype, load_from_hub=False, **kwargs):
+        super().__init__()
         self.mamba_config = mamba_config
         self.attn_layers = attn_layers
         self.model = transformer_model
@@ -459,3 +460,103 @@ class EvalQwen2Mamba2TransformerHybridModelWrapper(EvalMamba2TransformerHybridMo
         merge_projections_for_qwen2_layers(ckpt, self.attn_layers)
         self.model.load_state_dict(ckpt, strict=False) # without lm_heads
         self.model = self.model.to(dtype).cuda()
+
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return {
+            i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+            for i, layer in enumerate(self.model.model.layers)
+        }
+
+    def generate(
+        self,
+        input_ids,
+        max_new_tokens,
+        inputs_embeds=None,
+        top_k=1,
+        top_p=0.0,
+        min_p=0.0,
+        temperature=1.0,
+        return_dict_in_generate=False,
+        output_scores=False,
+        **kwargs,
+    ):
+        output = decode(
+            input_ids, self, max_length=max_new_tokens, inputs_embeds=inputs_embeds,
+            top_k=top_k, top_p=top_p, min_p = min_p, temperature=temperature, **kwargs
+        )
+        if not output_scores:
+            output.scores = None
+        return output if return_dict_in_generate else output.sequences
+    
+    def forward(self, input_ids, inputs_embeds=None, position_ids=None, inference_params=None, num_last_tokens=0, **mixer_kwargs):
+        """
+        "position_ids" is just to be compatible with Transformer generation. We don't use it.
+        num_last_tokens: if > 0, only return the logits for the last n tokens
+        """
+        if inputs_embeds is None:
+            hidden_states = self.model.model.embed_tokens(input_ids, **mixer_kwargs)
+        else:
+            hidden_states = inputs_embeds
+        for decoder_layer in self.model.model.layers:
+            hidden_states = decoder_layer(hidden_states, inference_params=inference_params, **mixer_kwargs)
+        if hasattr(self.model.model, "norm"):
+            hidden_states = self.model.model.norm(hidden_states)
+        elif hasattr(self.model.model, "final_layernorm"):
+            hidden_states = self.model.model.final_layernorm(hidden_states)
+        if num_last_tokens > 0:
+            hidden_states = hidden_states[:, -num_last_tokens:]
+        lm_logits = self.model.lm_head(hidden_states)
+        CausalLMOutput = namedtuple("CausalLMOutput", ["logits"])
+        return CausalLMOutput(logits=lm_logits)
+
+
+    @staticmethod
+    def from_pretrained_local(pretrained_model_name, transformer_model, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
+        config_data = load_config_hf(pretrained_model_name)
+        with open(f'{pretrained_model_name}/{MAMBA_CONFIG_NAME}', 'r') as json_file:
+            config_dict = json.load(json_file)
+        mamba_config = MambaConfig(**config_dict)
+        return EvalQwen2Mamba2TransformerHybridModelWrapper(pretrained_model_name, transformer_model, mamba_config, mamba_config.attn_layers, torch_dtype, init_with_kqvo=False) 
+
+    @staticmethod
+    def from_pretrained_hub(pretrained_model_name, transformer_model, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
+        config_data = load_config_hf(pretrained_model_name)
+        resolved_archive_file = cached_file(pretrained_model_name, MAMBA_CONFIG_NAME, _raise_exceptions_for_missing_entries=False)
+        config_dict = json.load(open(resolved_archive_file))
+        if "phi" in config_data["llm_model_name_or_path"].lower():
+            mamba_config = PhiMambaConfig(**config_dict)
+        else:
+            mamba_config = MambaConfig(**config_dict)
+        return EvalQwen2Mamba2TransformerHybridModelWrapper(pretrained_model_name, transformer_model, mamba_config, mamba_config.attn_layers, torch_dtype, init_with_kqvo=False, load_from_hub=True) 
+
+    @staticmethod
+    def from_pretrained(pretrained_model_name, transformer_model, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"):
+        if os.path.exists(pretrained_model_name):
+            return EvalQwen2Mamba2TransformerHybridModelWrapper.from_pretrained_local(pretrained_model_name, transformer_model, torch_dtype, attn_implementation)
+        else:
+            return EvalQwen2Mamba2TransformerHybridModelWrapper.from_pretrained_hub(pretrained_model_name, transformer_model, torch_dtype, attn_implementation)
+
+
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, value):
+        self.model.set_input_embeddings(value)
+
+    def get_output_embeddings(self):
+        return self.model.get_output_embeddings()
+
+    def set_output_embeddings(self, new_embeddings):
+        self.model.set_output_embeddings(new_embeddings)
+
+    def set_decoder(self, decoder):
+        self.model.set_decoder(decoder)
+
+    def get_decoder(self):
+        return self.model.get_decoder()
+
+    def tie_weights(self):
+        return self.model.tie_weights()
+    
+    def resize_token_embeddings(self, new_num_tokens: Optional[int] = None, pad_to_multiple_of=None) -> nn.Embedding:
+        return  self.model.resize_token_embeddings(new_num_tokens, pad_to_multiple_of)        
